@@ -5,6 +5,7 @@ import bz2
 import re
 import h5py
 import requests
+import multiprocessing as mp
 
 from scipy.interpolate import interp1d
 import scipy.constants as sc
@@ -899,7 +900,9 @@ class VALD_Kurucz(LineList):
 
         # If alkali, provide E_ion and Z for different vdW-broadening
         self.E_ion = getattr(conf, 'E_ion', None) # [cm^-1]
-        self.Z     = getattr(conf, 'Z', None)
+        if self.E_ion is None and self.database == 'vald':
+            self.E_ion = self.get_NIST_Eion(conf.species)
+        self.Z     = getattr(conf, 'Z', 1)
 
         # Transition-energies to ignore
         self.nu_0_to_ignore = getattr(conf, 'nu_0_to_ignore', None)
@@ -992,7 +995,6 @@ class VALD_Kurucz(LineList):
         # Log radiative/natural damping
         log_gamma_N = trans[:,11].astype(np.float64)
 
-        print(nu_0[0], E_low[0], gf[0], gamma_vdW[0], log_gamma_N[0])
         return nu_0, E_low, gf, gamma_vdW, log_gamma_N
 
     def get_cross_sections(self, CS, file, show_pbar=True):
@@ -1008,6 +1010,7 @@ class VALD_Kurucz(LineList):
         
         # Compute line-strength at reference temperature
         term1 = (gf * np.pi*e**2) / ((1e3*sc.m_e)*(100*sc.c)**2)
+        # print(f'[VALD_Kurucz._read_Kurucz_transitions] E_low = {E_low[0]}')
         term2 = np.exp(-c2*E_low/CS.T_0) / CS.q_0
         term3 = (1-np.exp(-c2*nu_0/CS.T_0))
         S_0 = term1 * term2 * term3
@@ -1072,14 +1075,20 @@ class VALD_Kurucz(LineList):
         
         
     @classmethod
-    def download_Kurucz_transitions(self, conf, element=None, ionization_state=0,
-                                    filename=None):
+    def download_Kurucz_transitions(self, conf, 
+                                    element=None, 
+                                    ionization_state=0,
+                                    filename=None,
+                                    extension='all'):
         """
         Downloads the atomic line list for the given atom and ionization state from the Kurucz database.
         
         Parameters:
         atom (str): The chemical symbol of the element (e.g., 'Fe', 'Mg').
         ionization_state (int): Ionization state of the atom (default is 0 for neutral atoms).
+        filename (str, optional): The name of the file to save the downloaded data.
+        extension (str, optional): The extension of the line list file to download.
+            Can be 'all' (default), 'pos' or 'lines', see http://kurucz.harvard.edu/atoms.html for details.
 
         Returns:
         str: The filename of the downloaded line list if successful, None otherwise.
@@ -1089,6 +1098,9 @@ class VALD_Kurucz(LineList):
         input_dir.mkdir(parents=True, exist_ok=True)
         
         element = element or conf.species
+        
+        available_extensions = ['all', 'pos', 'lines']
+        assert extension in available_extensions, f'Invalid extension, must be one of {available_extensions}'
 
         try:
             # Get the atomic number corresponding to the element's symbol
@@ -1102,15 +1114,25 @@ class VALD_Kurucz(LineList):
             print(f'{element} has ID {atom_id}')
 
             # Construct the URL for downloading the line list
-            url = f"http://kurucz.harvard.edu/atoms/{atom_id}/gf{atom_id}.lines"
+            url = f"http://kurucz.harvard.edu/atoms/{atom_id}/gf{atom_id}.{extension}"
             
             # File name to save the downloaded content, based on the atom's symbol
             if filename is None:
                 filename = input_dir / f"{element}_kurucz_transitions.txt"
 
             # Send an HTTP GET request to the URL to download the file
-            response = requests.get(url)
-            response.raise_for_status()  # Raise an error for unsuccessful requests
+            # try the given extension, if it fails, try the other extensions
+            try_extensions = [extension] + [ext for ext in available_extensions if ext != extension]
+            for ext in try_extensions: # run loop until one works
+                try:
+                    print(f"Trying extension: {ext}")
+                    url = f"http://kurucz.harvard.edu/atoms/{atom_id}/gf{atom_id}.{ext}"
+                    response = requests.get(url)
+                    response.raise_for_status()
+                    break
+                except requests.exceptions.HTTPError as http_err:
+                    print(f"HTTP error occurred: {http_err}")
+                    print(f"Trying other extensions...")
 
             # Save the downloaded content to a local file
             with open(filename, 'wb') as f:
@@ -1179,6 +1201,28 @@ class VALD_Kurucz(LineList):
         except requests.exceptions.HTTPError as http_err:
             print(f"HTTP error occurred: {http_err}")
             return None
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            return None
+        
+    @classmethod
+    def get_NIST_Eion(self, element):
+    
+        # from https://physics.nist.gov/PhysRefData/ASD/ionEnergy.html
+        # with units in cm^-1, format tab-delimited, order by Z
+        # ticked boxes: ion charge, ionization energy
+        url = f'https://physics.nist.gov/cgi-bin/ASD/ie.pl?spectra={element}+I&units=0&format=3&order=0&ion_charge_out=on&e_out=0&submit=Retrieve+Data'
+        
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            Eion = float(response.text.split('\t')[-3].replace('"',''))
+            return Eion # [cm^-1]
+        
+        except requests.exceptions.HTTPError as http_err:
+            print(f"HTTP error occurred: {http_err}")
+            return None
+        
         except Exception as e:
             print(f"An error occurred: {e}")
             return None

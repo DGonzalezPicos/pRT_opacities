@@ -76,6 +76,7 @@ class Figures:
             )
         plt.tight_layout()
         plt.savefig(save_file)
+        print(f' Saved to {save_file}')
         plt.close()
 
     def plot_T(self, P=1, T=None, cmap='coolwarm', save_file='plots/T.pdf', ylim=None):
@@ -126,6 +127,7 @@ class Figures:
             )
         plt.tight_layout()
         plt.savefig(save_file)
+        print(f' Saved to {save_file}')
         plt.close()
 
 class pRT_Figures:
