@@ -270,8 +270,111 @@ class LineList:
             print('Database is HITRAN/HITEMP, so line-strengths are scaled by solar isotope ratio.\n\
             You may need to change the \"molparam\" value in \"molparam_id.txt\".')
             print('#'*50)
+            
+    def convert_to_pRT3_format(self,
+                               out_dir, 
+                               pRT_wave_file,
+                               isotopologue_id={'C': 12, 'O': 16}, # --> "12C-O16"
+                               debug=False,
+                               **kwargs):
+        
+        print('\nConverting to pRT3 opacity format')
 
-    def convert_to_pRT2_format_old(self, out_dir, pRT_wave_file, make_short_file, debug=False):
+        # Load output: wave [um], sigma [cm^2/molecule], P [bar], T [K]
+        wave_um, sigma, P_bar, T = self.load_final_output()
+        wave_cm = wave_um * 1e-4
+
+        # Load pRT wavelength-grid
+        pRT_wave = np.genfromtxt(pRT_wave_file) # [cm]
+        if kwargs.get('crop_to_28um', False): # Set maximum wavelength to 28um, common for pRT3
+            pRT_wave = pRT_wave[pRT_wave <= 28e-4]
+            
+
+        # Create directory if not exist
+        out_dir = out_dir.replace('pRT2', 'pRT3')
+        pathlib.Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+
+        # (wave.size, P.size, T.size) -> (P.size, T.size, wave.size)
+        sigma = np.moveaxis(sigma, 0, -1)
+        
+        # Interpolate onto pRT's wavelength-grid
+        new_sigma = np.zeros((sigma.shape[0], sigma.shape[1], pRT_wave.size))
+        for i in range(sigma.shape[0]):
+            for j in range(sigma.shape[1]):
+                new_sigma[i,j] = np.interp(pRT_wave, wave_cm, sigma[i,j], left=0.0, right=0.0)
+                
+        # 2) Convert sigma to variable `xsecarr` 
+        wavenumbers = 1 / pRT_wave
+        wavenumbers = wavenumbers[::-1]
+        wave_um_pRT = 1e4 * (1 / wavenumbers) # [cm^-1] -> [um]
+        
+        # check valid wavelength range
+        wave_um_min = max(wave_um.min(), wave_um_pRT.min())
+        wave_um_max = min(wave_um.max(), wave_um_pRT.max())
+        
+        xsecarr = new_sigma[:,:,::-1] # (P, T, wavenumber)
+        del sigma
+        
+        if debug:
+            print(f'[convert_to_pRT3_format] wave_um min: {wave_um.min():.2e} um wave_um max: {wave_um.max():.2e} um')
+            print(f'[convert_to_pRT3_format] xsecarr shape: {xsecarr.shape}')
+        
+        
+        # Save in pRT3 format following:
+        # https://gitlab.com/mauricemolli/petitRADTRANS/-/blob/master/petitRADTRANS/__file_conversion.py
+
+        # examples: 
+        # 1) isotopologue_id={'K':39}           --> '39K'
+        # 2) isotopologue_id={'C': 12, 'O': 16} --> '12C-16O'
+        # 3) isotopologue_id={'H2':1, 'O':18}   --> '1H2-18O'
+        # 4) isotopologue_id={'C':12, 'H4':1}   --> '12C-1H4'
+        species = "".join(list(isotopologue_id.keys()))
+        species_isotopologue_name = "-".join([f"{v}{k}" for k,v in isotopologue_id.items()])
+        mass = self.atoms_info.loc[species,'mass']
+        if debug:
+            print(f"[convert_to_pRT3_format] Atomic mass of {species_isotopologue_name}: {mass}")
+        
+        source = getattr(self, 'database', 'UNKNOWN')
+        if source == 'UNKNOWN':
+            print('WARNING: No database source found, set using "database" attribute. Defaulting to "UNKNOWN"')
+            
+        resolving_power = kwargs.get('resolving_power', 1e6)
+        file_pRT3 = get_opacity_filename(resolving_power=resolving_power,
+                                            wavelength_boundaries=[wave_um_min, wave_um_max],
+                                            species_isotopologue_name=species_isotopologue_name,
+                                            source=source,
+        )
+
+        # output_dir = pathlib.Path("/net/lem/data2/pRT3/input_data/opacities/lines/line_by_line/") / species / species_isotopologue_name
+        # assert output_dir.exists(), f"Output directory {output_dir} does not exist"
+        out_dir_species = pathlib.Path(out_dir) / species / species_isotopologue_name
+        out_dir_species.mkdir(parents=True, exist_ok=True)
+        
+        hdf5_opacity_file = out_dir_species / f'{file_pRT3}.xsec.petitRADTRANS.h5'
+        if debug:
+            print(f'[convert_to_pRT3_format] Saving to file: {hdf5_opacity_file}...')
+
+        print(hdf5_opacity_file)
+        doi = kwargs.get('doi', 'None')
+        contributor = kwargs.get('contributor', 'LEM') # default to LEM (Leiden Exoplanet Machine)
+        description = kwargs.get('description', 'Converted from `cs_package` format to `pRT3` format')
+
+        write_line_by_line(hdf5_opacity_file, 
+                        doi,
+                        wavenumbers, 
+                        xsecarr, 
+                        mass,
+                        species, 
+                        np.unique(P_bar),
+                        np.unique(T), 
+                        wavelengths=None, 
+                        contributor=contributor,
+                        description=description)
+        
+        
+
+    def combine_cross_sections(self, tmp_dir, N_trans, append_to_existing=False):
 
         print('\nConverting to pRT2 opacity format')
 
@@ -538,6 +641,8 @@ def process_PT_point(P, T, wave_cm, sigma_slice, pRT_wave, out_dir, debug=False)
     
 class ExoMol(LineList):
 
+    database = 'exomol'
+    
     @classmethod
     def download_data(cls, conf):
 
@@ -802,7 +907,8 @@ class ExoMol(LineList):
                 i += 1
 
 class HITEMP(LineList):
-
+    database = 'hitemp'
+    
     @classmethod
     def download_data(cls, conf):
         
@@ -1072,181 +1178,139 @@ class VALD_Kurucz(LineList):
             )
             
         return CS
-        
-        
-    @classmethod
-    def download_Kurucz_transitions(self, conf, 
-                                    element=None, 
-                                    ionization_state=0,
-                                    filename=None,
-                                    extension='all'):
-        """
-        Downloads the atomic line list for the given atom and ionization state from the Kurucz database.
-        
-        Parameters:
-        atom (str): The chemical symbol of the element (e.g., 'Fe', 'Mg').
-        ionization_state (int): Ionization state of the atom (default is 0 for neutral atoms).
-        filename (str, optional): The name of the file to save the downloaded data.
-        extension (str, optional): The extension of the line list file to download.
-            Can be 'all' (default), 'pos' or 'lines', see http://kurucz.harvard.edu/atoms.html for details.
-
-        Returns:
-        str: The filename of the downloaded line list if successful, None otherwise.
-        """
-        
-        input_dir = pathlib.Path(conf.input_dir)
-        input_dir.mkdir(parents=True, exist_ok=True)
-        
-        element = element or conf.species
-        
-        available_extensions = ['all', 'pos', 'lines']
-        assert extension in available_extensions, f'Invalid extension, must be one of {available_extensions}'
-
-        try:
-            # Get the atomic number corresponding to the element's symbol
-            atomic_number = atomic_symbol_to_number.get(element)
-
-            if atomic_number is None:
-                raise ValueError(f"Invalid atomic symbol: {element}")
-            
-            # Format the atomic number and ionization state for constructing the URL
-            atom_id = f"{atomic_number:02d}{ionization_state:02d}"
-            print(f'{element} has ID {atom_id}')
-
-            # Construct the URL for downloading the line list
-            url = f"http://kurucz.harvard.edu/atoms/{atom_id}/gf{atom_id}.{extension}"
-            
-            # File name to save the downloaded content, based on the atom's symbol
-            if filename is None:
-                filename = input_dir / f"{element}_kurucz_transitions.txt"
-
-            # Send an HTTP GET request to the URL to download the file
-            # try the given extension, if it fails, try the other extensions
-            try_extensions = [extension] + [ext for ext in available_extensions if ext != extension]
-            for ext in try_extensions: # run loop until one works
-                try:
-                    print(f"Trying extension: {ext}")
-                    url = f"http://kurucz.harvard.edu/atoms/{atom_id}/gf{atom_id}.{ext}"
-                    response = requests.get(url)
-                    response.raise_for_status()
-                    break
-                except requests.exceptions.HTTPError as http_err:
-                    print(f"HTTP error occurred: {http_err}")
-                    print(f"Trying other extensions...")
-
-            # Save the downloaded content to a local file
-            with open(filename, 'wb') as f:
-                f.write(response.content)
-
-            print(f"Downloaded {filename}")
-            return filename
-
-        except requests.exceptions.HTTPError as http_err:
-            print(f"HTTP error occurred: {http_err}")
-        except Exception as e:
-            print(f"Failed to download atomic line list: {e}")
-        
-        return None
-
-    @classmethod
-    def download_NIST_states(self, conf, element=None, filename=None):
-        """
-        Downloads energy levels for the given element from the NIST Atomic Spectra Database (ASD).
-        
-        Parameters:
-        element (str): The chemical symbol of the element (e.g., 'K' for potassium).
-        filename (str, optional): The name of the file to save the downloaded data. 
-                                Defaults to "{element}_NIST_levels_tab_delimited.tsv" if not provided.
-
-        Returns:
-        str: The name of the file where the data is saved.
-        
-        Raises:
-        ValueError: If the element symbol is invalid or empty.
-        requests.exceptions.RequestException: If the download fails due to an HTTP error.
-        """
-        input_dir = pathlib.Path(conf.input_dir)
-        input_dir.mkdir(parents=True, exist_ok=True)
-        
-        element = element or conf.species
-        
-        # Validate the element input
-        if not element or not element.isalpha():
-            raise ValueError("Invalid element symbol. Please provide a valid chemical symbol.")
-        
-        # Construct the NIST URL for downloading energy levels
-        url = (
-            f"https://physics.nist.gov/cgi-bin/ASD/energy1.pl?"
-            f"de=0&spectrum={element}+I&submit=Retrieve+Data&units=0&format=3&output=0&page_size=15"
-            "&multiplet_ordered=0&conf_out=on&term_out=on&level_out=on&unc_out=1&j_out=on&g_out=on"
-            "&lande_out=on&biblio=on&temp="
-        )
-        
-        try:
-            # Send an HTTP GET request to download the data
-            response = requests.get(url)
-            response.raise_for_status()  # Raise an exception if the request was unsuccessful
-
-            # If no filename is provided, use the default naming convention
-            if filename is None:
-                filename = input_dir / f"{element}_NIST_levels_tab_delimited.tsv"
-
-            # Save the downloaded content to a local file
-            with open(filename, 'wb') as f:
-                f.write(response.content)
-
-            print(f"Downloaded {filename}")
-            return filename
-
-        except requests.exceptions.HTTPError as http_err:
-            print(f"HTTP error occurred: {http_err}")
-            return None
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            return None
-        
-    @classmethod
-    def get_NIST_Eion(self, element):
     
-        # from https://physics.nist.gov/PhysRefData/ASD/ionEnergy.html
-        # with units in cm^-1, format tab-delimited, order by Z
-        # ticked boxes: ion charge, ionization energy
-        url = f'https://physics.nist.gov/cgi-bin/ASD/ie.pl?spectra={element}+I&units=0&format=3&order=0&ion_charge_out=on&e_out=0&submit=Retrieve+Data'
+    
+## Helper functions (move somewhere else?) ##
+
+# adapted from https://gitlab.com/mauricemolli/petitRADTRANS/-/blob/master/petitRADTRANS/__file_conversion.py
+def write_line_by_line(file, doi, wavenumbers, opacities, mol_mass, species,
+                       opacities_pressures, opacities_temperatures, wavelengths=None,
+                       contributor=None, description=None,
+                       pRT_version="3.0.7"):
+    import datetime
+    
+    if wavelengths is None:
+        wavelengths = np.array([1 / wavenumbers[0], 1 / wavenumbers[-1]])
+
+    with h5py.File(file, "w") as fh5:
+        dataset = fh5.create_dataset(
+            name='DOI',
+            shape=(1,),
+            data=doi
+        )
+        dataset.attrs['long_name'] = 'Data object identifier linked to the data'
+        dataset.attrs['contributor'] = str(contributor)
+        dataset.attrs['additional_description'] = str(description)
+
+        dataset = fh5.create_dataset(
+            name='Date_ID',
+            shape=(1,),
+            data=f'petitRADTRANS-v{pRT_version}_{datetime.datetime.now(datetime.timezone.utc).isoformat()}'
+        )
+        dataset.attrs['long_name'] = 'ISO 8601 UTC time (https://docs.python.org/3/library/datetime.html) ' \
+                                     'at which the table has been created, ' \
+                                     'along with the version of petitRADTRANS'
+
+        dataset = fh5.create_dataset(
+            name='bin_edges',
+            data=wavenumbers
+        )
+        dataset.attrs['long_name'] = 'Wavenumber grid'
+        dataset.attrs['units'] = 'cm^-1'
+
+        dataset = fh5.create_dataset(
+            name='xsecarr',
+            data=opacities
+        )
+        dataset.attrs['long_name'] = 'Table of the cross-sections with axes (pressure, temperature, wavenumber)'
+        dataset.attrs['units'] = 'cm^2/molecule'
+
+        dataset = fh5.create_dataset(
+            name='mol_mass',
+            shape=(1,),
+            data=float(mol_mass)
+        )
+        dataset.attrs['long_name'] = 'Mass of the species'
+        dataset.attrs['units'] = 'AMU'
+
+        dataset = fh5.create_dataset(
+            name='mol_name',
+            shape=(1,),
+            data=species.split('_', 1)[0]
+        )
+        dataset.attrs['long_name'] = 'Name of the species described'
+
+        dataset = fh5.create_dataset(
+            name='p',
+            data=opacities_pressures
+        )
+        dataset.attrs['long_name'] = 'Pressure grid'
+        dataset.attrs['units'] = 'bar'
+
+        dataset = fh5.create_dataset(
+            name='t',
+            data=opacities_temperatures
+        )
+        dataset.attrs['long_name'] = 'Temperature grid'
+        dataset.attrs['units'] = 'K'
+
+        dataset = fh5.create_dataset(
+            name='temperature_grid_type',
+            shape=(1,),
+            data='regular'
+        )
+        dataset.attrs['long_name'] = 'Whether the temperature grid is "regular" ' \
+                                     '(same temperatures for all pressures) or "pressure-dependent"'
+
+        dataset = fh5.create_dataset(
+            name='wlrange',
+            data=np.array([wavelengths.min(), wavelengths.max()]) * 1e4  # cm to um
+        )
+        dataset.attrs['long_name'] = 'Wavelength range covered'
+        dataset.attrs['units'] = 'µm'
+
+        dataset = fh5.create_dataset(
+            name='wnrange',
+            data=np.array([wavenumbers.min(), wavenumbers.max()])
+        )
+        dataset.attrs['long_name'] = 'Wavenumber range covered'
+        dataset.attrs['units'] = 'cm^-1'
         
-        try:
-            response = requests.get(url)
-            response.raise_for_status()
-            Eion = float(response.text.split('\t')[-3].replace('"',''))
-            return Eion # [cm^-1]
-        
-        except requests.exceptions.HTTPError as http_err:
-            print(f"HTTP error occurred: {http_err}")
-            return None
-        
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            return None
+    print(f"Saved to {file}")
+    return None
 
 
+def get_opacity_filename(resolving_power, wavelength_boundaries, species_isotopologue_name,
+                         source):
+    if resolving_power < 1e6:
+        resolving_power = f"{resolving_power:.0f}"
+    else:
+        decimals = np.mod(resolving_power / 10 ** np.floor(np.log10(resolving_power)), 1)
 
+        if decimals >= 1e-3:
+            resolving_power = f"{resolving_power:.3e}"
+        else:
+            resolving_power = f"{resolving_power:.0e}"
 
-# Atomic number to symbol mapping, needed for kurucz download
-atomic_number_to_symbol = {
-    1: 'H', 2: 'He', 3: 'Li', 4: 'Be', 5: 'B', 6: 'C', 7: 'N', 8: 'O', 9: 'F', 10: 'Ne',
-    11: 'Na', 12: 'Mg', 13: 'Al', 14: 'Si', 15: 'P', 16: 'S', 17: 'Cl', 18: 'Ar', 19: 'K',
-    20: 'Ca', 21: 'Sc', 22: 'Ti', 23: 'V', 24: 'Cr', 25: 'Mn', 26: 'Fe', 27: 'Co', 28: 'Ni',
-    29: 'Cu', 30: 'Zn', 31: 'Ga', 32: 'Ge', 33: 'As', 34: 'Se', 35: 'Br', 36: 'Kr', 37: 'Rb',
-    38: 'Sr', 39: 'Y', 40: 'Zr', 41: 'Nb', 42: 'Mo', 43: 'Tc', 44: 'Ru', 45: 'Rh', 46: 'Pd',
-    47: 'Ag', 48: 'Cd', 49: 'In', 50: 'Sn', 51: 'Sb', 52: 'Te', 53: 'I', 54: 'Xe', 55: 'Cs',
-    56: 'Ba', 57: 'La', 58: 'Ce', 59: 'Pr', 60: 'Nd', 61: 'Pm', 62: 'Sm', 63: 'Eu', 64: 'Gd',
-    65: 'Tb', 66: 'Dy', 67: 'Ho', 68: 'Er', 69: 'Tm', 70: 'Yb', 71: 'Lu', 72: 'Hf', 73: 'Ta',
-    74: 'W', 75: 'Re', 76: 'Os', 77: 'Ir', 78: 'Pt', 79: 'Au', 80: 'Hg', 81: 'Tl', 82: 'Pb',
-    83: 'Bi', 84: 'Po', 85: 'At', 86: 'Rn', 87: 'Fr', 88: 'Ra', 89: 'Ac', 90: 'Th', 91: 'Pa',
-    92: 'U', 93: 'Np', 94: 'Pu', 95: 'Am', 96: 'Cm', 97: 'Bk', 98: 'Cf', 99: 'Es', 100: 'Fm',
-    101: 'Md', 102: 'No', 103: 'Lr', 104: 'Rf', 105: 'Db', 106: 'Sg', 107: 'Bh', 108: 'Hs',
-    109: 'Mt', 110: 'Ds', 111: 'Rg', 112: 'Cn', 113: 'Nh', 114: 'Fl', 115: 'Mc', 116: 'Lv',
-    117: 'Ts', 118: 'Og'
-}
+    spectral_info = (f"R{resolving_power}_"
+                     f"{wavelength_boundaries[0]:.1f}-{wavelength_boundaries[1]:.1f}mu")
 
-# Reverse dictionary: symbol to atomic number
-atomic_symbol_to_number = {v: k for k, v in atomic_number_to_symbol.items()}
+    return join_species_all_info(
+        name=species_isotopologue_name,
+        source=source,
+        spectral_info=spectral_info
+    )
+    
+def join_species_all_info(name, natural_abundance='', charge='', cloud_info='', source='', spectral_info=''):
+    if natural_abundance != '':
+        name += '-' + natural_abundance
+
+    name += charge + cloud_info
+
+    if source != '':
+        name += '__' + source
+
+    if spectral_info != '':
+        name += '.' + spectral_info
+
+    return name

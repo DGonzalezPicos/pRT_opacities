@@ -70,7 +70,7 @@ if __name__ == '__main__':
     # Create custom grid with P and T values
     # define several temperature ranges with different spacings
     import pathlib
-    file = pathlib.Path('input_data/PT_grids/PTpaths_high_dario_test.ls')
+    file = pathlib.Path('input_data/PT_grids/PTpaths_high_dario.ls')
     file.parent.mkdir(parents=True, exist_ok=True)
     
     pt_grid = PT_Grid(

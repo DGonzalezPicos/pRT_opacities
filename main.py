@@ -23,6 +23,7 @@ if __name__ == '__main__':
     parser.add_argument('--plot', action='store_true')
 
     parser.add_argument('--convert_to_pRT2', action='store_true')
+    parser.add_argument('--convert_to_pRT3', action='store_true')
     parser.add_argument('--append_to_existing', action='store_true')
 
     # Index to read if multiple .trans files are given
