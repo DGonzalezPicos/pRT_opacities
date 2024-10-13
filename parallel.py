@@ -15,7 +15,7 @@ args = argparser.parse_args()
 PT_file = "input_data/PT_grids/PTpaths_high_dario.ls"
 species = args.species
 # script = "input/Kurucz_Ni.py"
-script = f'input/example_kurucz.py'
+script = f'input/example_Kurucz.py'
 ncpus = args.ncpus
 
 # Print statement to check the path, script, and ncpus

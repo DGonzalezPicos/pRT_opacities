@@ -44,9 +44,10 @@ if __name__ == '__main__':
     conf = __import__(input_string, fromlist=[''])
     
     if args.species is not None:
-        from input.atomic_mass import atomic_mass_dict
+        from pandas import read_csv
+        atoms_info = read_csv('atoms_info.csv', index_col=0)
         conf.species = args.species
-        conf.mass = atomic_mass_dict[args.species]
+        conf.mass = atoms_info.loc[conf.species, 'mass']
         print(f' Updated species: {conf.species} | Mass: {conf.mass}')
         
         conf.input_dir = str(conf.input_dir).replace('Fe', conf.species)
@@ -54,7 +55,7 @@ if __name__ == '__main__':
             conf.files[key] = val.replace('Fe', conf.species)
         conf.pRT['out_dir'] = conf.pRT['out_dir'].replace('Fe', conf.species)
         
-        if args.species in ['Na', 'K']:
+        if args.species in ['Na', 'K', 'Mg']:
             conf.max_nu_sep = 4500.0 # [cm^-1]
             conf.wing_cutoff = lambda gamma_V, P: conf.max_nu_sep
             

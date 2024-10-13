@@ -258,7 +258,12 @@ class LineList:
         # Make executable and run
         import subprocess
         subprocess.run(['gfortran', '-o', f'{out_dir}/make_short', f'{out_dir}/make_short.f90'])
-        subprocess.call('./make_short', cwd=f'{out_dir}')
+        # check if the file make_short exists in the directory
+        if pathlib.Path(f'{out_dir}/make_short').exists():
+            subprocess.call('./make_short', cwd=f'{out_dir}')
+        else:
+            print(f'File {out_dir}/make_short does not exist, skipping...')
+            return None
 
         # Remove temporary files (on pRT's low-res wavelengths)
         for file_to_remove in np.array(PTpaths)[:,2]:
@@ -1178,6 +1183,183 @@ class VALD_Kurucz(LineList):
             )
             
         return CS
+    
+    @classmethod
+    def download_Kurucz_transitions(self, conf, 
+                                    element=None, 
+                                    ionization_state=0,
+                                    filename=None,
+                                    extension='all'):
+        """
+        Downloads the atomic line list for the given atom and ionization state from the Kurucz database.
+        
+        Parameters:
+        atom (str): The chemical symbol of the element (e.g., 'Fe', 'Mg').
+        ionization_state (int): Ionization state of the atom (default is 0 for neutral atoms).
+        filename (str, optional): The name of the file to save the downloaded data.
+        extension (str, optional): The extension of the line list file to download.
+            Can be 'all' (default), 'pos' or 'lines', see http://kurucz.harvard.edu/atoms.html for details.
+
+        Returns:
+        str: The filename of the downloaded line list if successful, None otherwise.
+        """
+        
+        input_dir = pathlib.Path(conf.input_dir)
+        input_dir.mkdir(parents=True, exist_ok=True)
+        
+        element = element or conf.species
+        
+        available_extensions = ['all', 'pos', 'lines']
+        assert extension in available_extensions, f'Invalid extension, must be one of {available_extensions}'
+
+        try:
+            # Get the atomic number corresponding to the element's symbol
+            atomic_number = atomic_symbol_to_number.get(element)
+
+            if atomic_number is None:
+                raise ValueError(f"Invalid atomic symbol: {element}")
+            
+            # Format the atomic number and ionization state for constructing the URL
+            atom_id = f"{atomic_number:02d}{ionization_state:02d}"
+            print(f'{element} has ID {atom_id}')
+
+            # Construct the URL for downloading the line list
+            url = f"http://kurucz.harvard.edu/atoms/{atom_id}/gf{atom_id}.{extension}"
+            
+            # File name to save the downloaded content, based on the atom's symbol
+            if filename is None:
+                filename = input_dir / f"{element}_kurucz_transitions.txt"
+
+            # Send an HTTP GET request to the URL to download the file
+            # try the given extension, if it fails, try the other extensions
+            try_extensions = [extension] + [ext for ext in available_extensions if ext != extension]
+            for ext in try_extensions: # run loop until one works
+                try:
+                    print(f"Trying extension: {ext}")
+                    url = f"http://kurucz.harvard.edu/atoms/{atom_id}/gf{atom_id}.{ext}"
+                    response = requests.get(url)
+                    response.raise_for_status()
+                    break
+                except requests.exceptions.HTTPError as http_err:
+                    print(f"HTTP error occurred: {http_err}")
+                    print(f"Trying other extensions...")
+
+            # Save the downloaded content to a local file
+            with open(filename, 'wb') as f:
+                f.write(response.content)
+
+            print(f"Downloaded {filename}")
+            return filename
+
+        except requests.exceptions.HTTPError as http_err:
+            print(f"HTTP error occurred: {http_err}")
+        except Exception as e:
+            print(f"Failed to download atomic line list: {e}")
+        
+        return None
+
+    @classmethod
+    def download_NIST_states(self, conf, element=None, filename=None):
+        """
+        Downloads energy levels for the given element from the NIST Atomic Spectra Database (ASD).
+        
+        Parameters:
+        element (str): The chemical symbol of the element (e.g., 'K' for potassium).
+        filename (str, optional): The name of the file to save the downloaded data. 
+                                Defaults to "{element}_NIST_levels_tab_delimited.tsv" if not provided.
+
+        Returns:
+        str: The name of the file where the data is saved.
+        
+        Raises:
+        ValueError: If the element symbol is invalid or empty.
+        requests.exceptions.RequestException: If the download fails due to an HTTP error.
+        """
+        input_dir = pathlib.Path(conf.input_dir)
+        input_dir.mkdir(parents=True, exist_ok=True)
+        
+        element = element or conf.species
+        
+        # Validate the element input
+        if not element or not element.isalpha():
+            raise ValueError("Invalid element symbol. Please provide a valid chemical symbol.")
+        
+        # Construct the NIST URL for downloading energy levels
+        url = (
+            f"https://physics.nist.gov/cgi-bin/ASD/energy1.pl?"
+            f"de=0&spectrum={element}+I&submit=Retrieve+Data&units=0&format=3&output=0&page_size=15"
+            "&multiplet_ordered=0&conf_out=on&term_out=on&level_out=on&unc_out=1&j_out=on&g_out=on"
+            "&lande_out=on&biblio=on&temp="
+        )
+        
+        try:
+            # Send an HTTP GET request to download the data
+            response = requests.get(url)
+            response.raise_for_status()  # Raise an exception if the request was unsuccessful
+
+            # If no filename is provided, use the default naming convention
+            if filename is None:
+                filename = input_dir / f"{element}_NIST_levels_tab_delimited.tsv"
+
+            # Save the downloaded content to a local file
+            with open(filename, 'wb') as f:
+                f.write(response.content)
+
+            print(f"Downloaded {filename}")
+            return filename
+
+        except requests.exceptions.HTTPError as http_err:
+            print(f"HTTP error occurred: {http_err}")
+            return None
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            return None
+        
+    @classmethod
+    def get_NIST_Eion(self, element):
+    
+        # from https://physics.nist.gov/PhysRefData/ASD/ionEnergy.html
+        # with units in cm^-1, format tab-delimited, order by Z
+        # ticked boxes: ion charge, ionization energy
+        url = f'https://physics.nist.gov/cgi-bin/ASD/ie.pl?spectra={element}+I&units=0&format=3&order=0&ion_charge_out=on&e_out=0&submit=Retrieve+Data'
+        
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            Eion = float(response.text.split('\t')[-3].replace('"',''))
+            return Eion # [cm^-1]
+        
+        except requests.exceptions.HTTPError as http_err:
+            print(f"HTTP error occurred: {http_err}")
+            return None
+        
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            return None
+
+
+
+
+# Atomic number to symbol mapping, needed for kurucz download
+atomic_number_to_symbol = {
+    1: 'H', 2: 'He', 3: 'Li', 4: 'Be', 5: 'B', 6: 'C', 7: 'N', 8: 'O', 9: 'F', 10: 'Ne',
+    11: 'Na', 12: 'Mg', 13: 'Al', 14: 'Si', 15: 'P', 16: 'S', 17: 'Cl', 18: 'Ar', 19: 'K',
+    20: 'Ca', 21: 'Sc', 22: 'Ti', 23: 'V', 24: 'Cr', 25: 'Mn', 26: 'Fe', 27: 'Co', 28: 'Ni',
+    29: 'Cu', 30: 'Zn', 31: 'Ga', 32: 'Ge', 33: 'As', 34: 'Se', 35: 'Br', 36: 'Kr', 37: 'Rb',
+    38: 'Sr', 39: 'Y', 40: 'Zr', 41: 'Nb', 42: 'Mo', 43: 'Tc', 44: 'Ru', 45: 'Rh', 46: 'Pd',
+    47: 'Ag', 48: 'Cd', 49: 'In', 50: 'Sn', 51: 'Sb', 52: 'Te', 53: 'I', 54: 'Xe', 55: 'Cs',
+    56: 'Ba', 57: 'La', 58: 'Ce', 59: 'Pr', 60: 'Nd', 61: 'Pm', 62: 'Sm', 63: 'Eu', 64: 'Gd',
+    65: 'Tb', 66: 'Dy', 67: 'Ho', 68: 'Er', 69: 'Tm', 70: 'Yb', 71: 'Lu', 72: 'Hf', 73: 'Ta',
+    74: 'W', 75: 'Re', 76: 'Os', 77: 'Ir', 78: 'Pt', 79: 'Au', 80: 'Hg', 81: 'Tl', 82: 'Pb',
+    83: 'Bi', 84: 'Po', 85: 'At', 86: 'Rn', 87: 'Fr', 88: 'Ra', 89: 'Ac', 90: 'Th', 91: 'Pa',
+    92: 'U', 93: 'Np', 94: 'Pu', 95: 'Am', 96: 'Cm', 97: 'Bk', 98: 'Cf', 99: 'Es', 100: 'Fm',
+    101: 'Md', 102: 'No', 103: 'Lr', 104: 'Rf', 105: 'Db', 106: 'Sg', 107: 'Bh', 108: 'Hs',
+    109: 'Mt', 110: 'Ds', 111: 'Rg', 112: 'Cn', 113: 'Nh', 114: 'Fl', 115: 'Mc', 116: 'Lv',
+    117: 'Ts', 118: 'Og'
+}
+
+# Reverse dictionary: symbol to atomic number
+atomic_symbol_to_number = {v: k for k, v in atomic_number_to_symbol.items()}
     
     
 ## Helper functions (move somewhere else?) ##
